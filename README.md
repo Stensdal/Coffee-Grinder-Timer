@@ -1,4 +1,4 @@
-# Coffee-Grinder-Timer
+# Coffee Grinder Timer
 A coffee grinder timer, for Arduino with OLED display and a rotary encoder, controlling the grinder motor with a relay. This can be built into most "dumb" coffee grinders without a timer. It allow you to control the grind time, for a precise amount of coffee for each shot.
 
 # Instructions
