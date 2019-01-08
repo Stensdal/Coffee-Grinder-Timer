@@ -1,6 +1,12 @@
 /* 
+ *  Coffee-Grinder-Timer.ino
+ *  
+ *  Copyright (c) 2019, t.stensdal@gmail.com
+ *  All rights reserved.
+ *  
+ *  Helpfull links:
  *  https://playground.arduino.cc/Code/HoldButton
- *  http://www.mathertel.de/Arduino/RotaryEncoderLibrary.aspx
+ *  https://www.pjrc.com/teensy/td_libs_Encoder.html
  *  https://github.com/olikraus/u8g2/wiki/u8g2reference
  *  
  *  
@@ -16,16 +22,26 @@
 #include <Wire.h>
 
 
+/*
+ * User Config
+ * 
+ * Change this if you have another display type or use other pin configurations
+*/
+
 // U8g2 Contructor List (Picture Loop Page Buffer)
 // The complete list is available here: https://github.com/olikraus/u8g2/wiki/u8g2setupcpp
 //U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ SCL, /* data=*/ SDA);   // pin remapping with ESP8266 HW I2C
 //U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 U8G2_SH1106_128X64_NONAME_2_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
-Encoder encoder(2, 3); // D5 + D6 - Setup encoder with correct pins
-const int ledPin = 13; // D4
-const int grinderPin = 12; //D7 - High is off low on (Low level relay)
-const int buttonPin = 10; // D3 
+Encoder encoder(2, 3); // Setup encoder with correct pins, swap pins if wrong direction - Use pin 2 and 3 for best performance (These are interrupt pins)
+const int ledPin = 13; // Status led
+const int grinderPin = 12; // Pin for relay controlling the grinder
+const int buttonPin = 10; // Button on rotary encoder 
+
+/*
+ * End of user config
+ */
 
 
 // the current state of the LED / Grinder
@@ -42,16 +58,16 @@ unsigned long debounceDelay = 50;    // the state must remain the same for this 
 bool buttonHold = false;
 
 // Rotary Encoder variables
-const int ROTARYMIN = 20; // =1 sekund
-const int ROTARYMAX = 600; // =30 sekunder
-int pos = 300; // =15 sekunder
+const int ROTARYMIN = 20; // = 1 second
+const int ROTARYMAX = 600; // = 30 seconds
+int pos = 300; // = 15 seconds
 int lastPos = pos;
 
 // Countdown variables
-int sec; // sekunder
-int msec;  // hundrededele sekund
+int sec; // seconds
+int dsec;  // desisecond (tenth of second)
 int secPaused;
-int msecPaused;
+int dsecPaused;
 uint32_t startTime, endTime;
 int sLeft, mLeft;
 bool pauseCountdown = false;
@@ -82,13 +98,13 @@ void fpauseCountdown() {
   Serial.println("Paused");
   buttonState = LOW;
   secPaused = sLeft;
-  msecPaused = mLeft;
+  dsecPaused = mLeft;
   while (digitalRead(buttonPin) == false) {
     delay(1);
   }
   Serial.print(secPaused);
   Serial.print(".");
-  Serial.println(msecPaused);
+  Serial.println(dsecPaused);
 }
 
 void runCountdown() {
@@ -105,14 +121,14 @@ void runCountdown() {
 
  
   if (pauseCountdown) { // if paused resume from ramaining time 
-    endTime = startTime + (secPaused * 1000) + (msecPaused * 100);
+    endTime = startTime + (secPaused * 1000) + (dsecPaused * 100);
     pauseCountdown = false;
     Serial.println("Resumed from pause");
     Serial.print(secPaused);
     Serial.print(".");
-    Serial.println(msecPaused);
+    Serial.println(dsecPaused);
   } else { // use normal 
-    endTime = startTime + (sec * 1000) + (msec * 100);
+    endTime = startTime + (sec * 1000) + (dsec * 100);
     Serial.print("End time: ");
     Serial.println(endTime);
   }
@@ -139,7 +155,7 @@ void runCountdown() {
   pauseCountdown = false;
   drawTimer(0, 0);
   delay(1000);
-  drawTimer(sec, msec);
+  drawTimer(sec, dsec);
 }
 
 /*--------------------
@@ -160,9 +176,9 @@ void setup(void) {
   Serial.begin(115200);
   
   encoder.write(pos); // set the start value  
-  msec = (pos/2) % 10; // tiendedele
+  dsec = (pos/2) % 10; // tiendedele
   sec = (pos/2) / 10;
-  drawTimer(sec, msec);
+  drawTimer(sec, dsec);
 }
 
 void loop(void) {
@@ -183,9 +199,9 @@ void loop(void) {
 
     // Convert pos to time and display
     if (!pauseCountdown) {
-      msec = (pos/2) % 10;
+      dsec = (pos/2) % 10;
       sec = (pos/2) / 10;
-      drawTimer(sec, msec);
+      drawTimer(sec, dsec);
       lastPos = pos;
       Serial.print(pos);
       Serial.println();
@@ -219,7 +235,7 @@ void loop(void) {
     // knappen holdt nede i minimum 1,5 sekunder
     if (thisButtonState == LOW && (millis() - lastDebounceTime) > 1500) {
       pauseCountdown = false;
-      drawTimer(sec, msec);
+      drawTimer(sec, dsec);
       Serial.println("Pause canceled");
       buttonHold = true;
     }  
