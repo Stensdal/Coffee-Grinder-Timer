@@ -17,10 +17,10 @@
 #define ENCODER_OPTIMIZE_INTERRUPTS
 
 #include <Arduino.h>
+#include <EEPROM.h>
+#include <Wire.h>
 #include <U8g2lib.h>
 #include <Encoder.h>
-#include <Wire.h>
-
 
 /*
  * User Config
@@ -31,13 +31,16 @@
 // U8g2 Contructor List (Picture Loop Page Buffer)
 // The complete list is available here: https://github.com/olikraus/u8g2/wiki/u8g2setupcpp
 //U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ SCL, /* data=*/ SDA);   // pin remapping with ESP8266 HW I2C
-//U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
-U8G2_SH1106_128X64_NONAME_2_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+//U8G2_SH1106_128X64_NONAME_2_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
 Encoder encoder(2, 3); // Setup encoder with correct pins, swap pins if wrong direction - Use pin 2 and 3 for best performance (These are interrupt pins)
 const int ledPin = 13; // Status led
 const int grinderPin = 12; // Pin for relay controlling the grinder
-const int buttonPin = 10; // Button on rotary encoder 
+const int buttonPin = 10; // Button on rotary encoder or single shot button
+//const int buttonPin2 = 11; // double shot button
+
+const bool grinderInverted = false; // if output for relay should be inverted
 
 /*
  * End of user config
@@ -46,7 +49,12 @@ const int buttonPin = 10; // Button on rotary encoder
 
 // the current state of the LED / Grinder
 int ledState = LOW; // LOW means off, HIGH means on
-int grinderState = HIGH; // LOW means on, HIGH means off
+int grinderState = (grinderInverted ? HIGH : LOW); // LOW means off, HIGH means on, reversed if grinderInverted is set to true
+
+double totalRuntime;
+unsigned int totalShotsGrinded;
+double total_kg_Grinded;
+double gramCoffeePerSec = 0.7;
 
 // the current and previous readings from the input pin
 int buttonState;
@@ -59,8 +67,8 @@ bool buttonHold = false;
 
 // Rotary Encoder variables
 const int ROTARYMIN = 20; // = 1 second
-const int ROTARYMAX = 600; // = 30 seconds
-int pos = 300; // = 15 seconds
+const int ROTARYMAX = 500; // = 25 seconds
+int pos = 300; // = load saved value
 int lastPos = pos;
 
 // Countdown variables
@@ -70,12 +78,41 @@ int secPaused;
 int dsecPaused;
 uint32_t startTime, endTime;
 int sLeft, mLeft;
-bool pauseCountdown = false;
+bool countdownPaused = false;
 
 
 /*--------------------
   ----- Functions ------
   --------------------*/
+
+void saveRuntimeToEeprom(int _runtime) {
+  static int _savedRuntime = 0;
+  
+  if (_savedRuntime != _runtime) {
+    _savedRuntime = _runtime;
+    EEPROM.write(100, _runtime);
+  }
+}
+
+void saveTotalRuntimeToEeprom(double _totalRuntime) {
+  static double _savedTotalRuntime = 0;
+  
+  if (_savedTotalRuntime != _totalRuntime) {
+    _savedTotalRuntime = _totalRuntime;
+      double _temp = _totalRuntime;    
+      byte _Mega_Byte = _temp/65535;
+      byte _High_Byte = (_temp - (_Mega_Byte*65535)) / 255;
+      byte _Low_Byte =  _temp - (_Mega_Byte*65535) - (_High_Byte*255);
+      EEPROM.write(110, _Mega_Byte);
+      EEPROM.write(111, _High_Byte);
+      EEPROM.write(112, _Low_Byte);
+  }
+}
+
+//void addRuntimeToTotal(int sec, int dsec) {
+// unfinished function
+//  double _temp   
+//}
 
 void drawTimer( uint8_t s, uint8_t m) {
   char m_str[4];
@@ -83,22 +120,35 @@ void drawTimer( uint8_t s, uint8_t m) {
 
   u8g2.firstPage();
   do {
-    u8g2.setFont(u8g2_font_logisoso24_tn);
-    u8g2.drawStr(32, 31, m_str);
+//    if (grinderState == LOW) { // if grinding
+//        // status countdown bar
+//    }
+//    else if (countdownPaused) { // if paused
+//      u8g2.setFont(u8g2_font_ncenR10_tr);
+//      u8g2.drawStr(48, 12, "Pause");
+//    } else {                    // if idle
+//      u8g2.setFont(u8g2_font_ncenR10_tr);
+//      u8g2.drawStr(0, 12, "#12");
+//      u8g2.drawStr(64, 12, "T:23m");
+//    }
+//    u8g2.drawHLine(0, 20, 128);
+    u8g2.setFont(u8g2_font_osr35_tn);
+    u8g2.drawStr(14, 63, m_str);
   } while ( u8g2.nextPage() );
 }
 
-void fpauseCountdown() {
+void pauseCountdown() {
   ledState = LOW;
-  grinderState = HIGH;
+  grinderState = (grinderInverted ? HIGH : LOW);
   digitalWrite(grinderPin, grinderState); // sluk relæ
   digitalWrite(ledPin, ledState); // sluk LED
   
-  pauseCountdown = true;
+  countdownPaused = true;
   Serial.println("Paused");
   buttonState = LOW;
   secPaused = sLeft;
   dsecPaused = mLeft;
+  drawTimer(secPaused, dsecPaused);
   while (digitalRead(buttonPin) == false) {
     delay(1);
   }
@@ -107,33 +157,34 @@ void fpauseCountdown() {
   Serial.println(dsecPaused);
 }
 
+
 void runCountdown() {
   Serial.println("start countdown");
   //delay(1000);
 
   startTime = millis();
-  Serial.print("Start time: ");
-  Serial.println(startTime);
+  //Serial.print("Start time: ");
+  //Serial.println(startTime);
   ledState = HIGH;
-  grinderState = LOW;
+  grinderState = (grinderInverted ? LOW : HIGH); // on
   digitalWrite(grinderPin, grinderState); // Tænd relæ
   digitalWrite(ledPin, ledState); // Tænd LED
 
  
-  if (pauseCountdown) { // if paused resume from ramaining time 
+  if (countdownPaused) { // if paused resume from ramaining time 
     endTime = startTime + (secPaused * 1000) + (dsecPaused * 100);
-    pauseCountdown = false;
+    countdownPaused = false;
     Serial.println("Resumed from pause");
-    Serial.print(secPaused);
-    Serial.print(".");
-    Serial.println(dsecPaused);
+    //Serial.print(secPaused);
+    //Serial.print(".");
+    //Serial.println(dsecPaused);
   } else { // use normal 
     endTime = startTime + (sec * 1000) + (dsec * 100);
-    Serial.print("End time: ");
-    Serial.println(endTime);
+    //Serial.print("End time: ");
+    //Serial.println(endTime);
   }
   
-  while (millis() < endTime && pauseCountdown == false) {
+  while (millis() < endTime && countdownPaused == false) {
     sLeft = ( endTime - millis() ) / 1000; // sekunder tilbage
     mLeft = (( endTime - millis() ) % 1000) / 100; // tiendedele af et sekund tilbage(0-99)
     drawTimer(sLeft, mLeft);
@@ -142,19 +193,20 @@ void runCountdown() {
     //Serial.println(mLeft);
 
     if (digitalRead(buttonPin) == false) { // pressed
-      fpauseCountdown();
+      pauseCountdown();
       Serial.println("Returning to main loop");
       return;
     }
     delay(10);
   }
   ledState = LOW;
-  grinderState = HIGH;
+  grinderState = (grinderInverted ? HIGH : LOW); // off
   digitalWrite(grinderPin, grinderState); // sluk relæ
   digitalWrite(ledPin, ledState); // sluk LED
-  pauseCountdown = false;
+  //countdownPaused = false;
   drawTimer(0, 0);
-  delay(1000);
+  //addRuntimeToTotal(sec, dsec);
+  delay(1500);
   drawTimer(sec, dsec);
 }
 
@@ -171,7 +223,6 @@ void setup(void) {
 
   delay(1500);
   u8g2.begin();
-  //u8g2.setFlipMode(1);
   delay(500);
   Serial.begin(115200);
   
@@ -179,6 +230,33 @@ void setup(void) {
   dsec = (pos/2) % 10; // tiendedele
   sec = (pos/2) / 10;
   drawTimer(sec, dsec);
+
+  if (EEPROM.read(99) == 1) { // if eeprom is configured
+    Serial.println("Loading saved state");
+    // Load totalRuntime
+    double temp = EEPROM.read(110);
+    totalRuntime = temp*65535;
+    temp = EEPROM.read(111);
+    totalRuntime = totalRuntime + (temp*255);
+    temp = EEPROM.read(112);
+    totalRuntime = totalRuntime + temp;
+
+    // Load last runtime
+    pos = EEPROM.read(100)*2;
+    lastPos = pos;
+  
+  } else {
+    // First run
+    Serial.println("First run, Configuring EEPROM");
+    
+    totalRuntime = 0;
+    totalShotsGrinded = 0;
+    EEPROM.write(99, 1);
+    saveRuntimeToEeprom(pos/2);
+    saveTotalRuntimeToEeprom(0);
+  }
+
+  
 }
 
 void loop(void) {
@@ -198,7 +276,7 @@ void loop(void) {
     }
 
     // Convert pos to time and display
-    if (!pauseCountdown) {
+    if (!countdownPaused) {
       dsec = (pos/2) % 10;
       sec = (pos/2) / 10;
       drawTimer(sec, dsec);
@@ -211,32 +289,43 @@ void loop(void) {
   }
 
   // Button logic
+  
   thisButtonState = digitalRead(buttonPin); // read button state, LOW when pressed, HIGH when not
 
-  if (thisButtonState == LOW && lastButtonState == HIGH && (millis() - lastDebounceTime) > debounceDelay) {
-    lastDebounceTime = millis(); // reset the debounce timer
-    if (buttonHold) {
-     buttonHold = false;
+  if (thisButtonState == LOW) { // if button pressed
+    if (lastButtonState == HIGH && (millis() - lastDebounceTime) > debounceDelay) { // check debounce
+      lastDebounceTime = millis(); // reset the debounce timer
+      if (buttonHold) {
+      buttonHold = false;
+      }
     }
   }
 
   // if the current state does not match the previous state
   // the button was just pressed/released, or is transition noise
 
-  // once delay millis have elapsed, if the state remains the same, register the press
+  // if debounce delay have elapsed, if the state remains the same, register the press
   if ((millis() - lastDebounceTime) > debounceDelay && !buttonHold) {
 
     // on release
     if (thisButtonState == HIGH && lastButtonState == LOW) {
       Serial.println("Countdown starting");
+      saveRuntimeToEeprom(pos/2);
       runCountdown();
     }  
     
     // knappen holdt nede i minimum 1,5 sekunder
     if (thisButtonState == LOW && (millis() - lastDebounceTime) > 1500) {
-      pauseCountdown = false;
-      drawTimer(sec, dsec);
-      Serial.println("Pause canceled");
+      if (countdownPaused) {
+        countdownPaused = false;
+        drawTimer(sec, dsec);
+        Serial.println("Pause canceled");
+      } else {
+        //Serial.println("Enter menu");
+        //drawMenu();
+      }
+      
+      
       buttonHold = true;
     }  
   }
@@ -244,5 +333,3 @@ void loop(void) {
   // persist for next loop iteration
   lastButtonState = thisButtonState;
 }
-
-
