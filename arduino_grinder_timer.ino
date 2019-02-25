@@ -31,14 +31,15 @@
 // U8g2 Contructor List (Picture Loop Page Buffer)
 // The complete list is available here: https://github.com/olikraus/u8g2/wiki/u8g2setupcpp
 //U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ SCL, /* data=*/ SDA);   // pin remapping with ESP8266 HW I2C
-U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
-//U8G2_SH1106_128X64_NONAME_2_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+//U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+U8G2_SH1106_128X64_NONAME_2_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
 Encoder encoder(2, 3); // Setup encoder with correct pins, swap pins if wrong direction - Use pin 2 and 3 for best performance (These are interrupt pins)
 const int ledPin = 13; // Status led
-const int grinderPin = 12; // Pin for relay controlling the grinder
-const int buttonPin = 10; // Button on rotary encoder or single shot button
-//const int buttonPin2 = 11; // double shot button
+const int grinderPin = 4; // Pin for relay controlling the grinder
+const int encoderButton = 10; // Button on rotary encoder or single shot button
+const int singleButton = 11; // signle shot button
+const int doubleButton = 12; // double shot button
 
 const bool grinderInverted = false; // if output for relay should be inverted
 
@@ -50,6 +51,8 @@ const bool grinderInverted = false; // if output for relay should be inverted
 // the current state of the LED / Grinder
 int ledState = LOW; // LOW means off, HIGH means on
 int grinderState = (grinderInverted ? HIGH : LOW); // LOW means off, HIGH means on, reversed if grinderInverted is set to true
+bool doubleShot = false;
+int shotDivider = 2;
 
 double totalRuntime;
 unsigned int totalShotsGrinded;
@@ -58,8 +61,12 @@ double gramCoffeePerSec = 0.7;
 
 // the current and previous readings from the input pin
 int buttonState;
-int thisButtonState = HIGH; // High is unpressed
-int lastButtonState = HIGH;
+int encButtonState = HIGH; // High is unpressed
+int lastEncButtonState = HIGH;
+int singleButtonState = HIGH; // High is unpressed
+int lastSingleButtonState = HIGH;
+int doubleButtonState = HIGH; // High is unpressed
+int lastDoubleButtonState = HIGH;
 // time is measured in milliseconds and will quickly exceed limitations of an integer, so we use a long for these two
 unsigned long lastDebounceTime = 0;  // the time the button state last switched
 unsigned long debounceDelay = 50;    // the state must remain the same for this many millis to register the button press
@@ -91,6 +98,8 @@ void saveRuntimeToEeprom(int _runtime) {
   if (_savedRuntime != _runtime) {
     _savedRuntime = _runtime;
     EEPROM.write(100, _runtime);
+    Serial.print("Saved runtime: ");
+    Serial.println(_runtime);
   }
 }
 
@@ -120,18 +129,17 @@ void drawTimer( uint8_t s, uint8_t m) {
 
   u8g2.firstPage();
   do {
-//    if (grinderState == LOW) { // if grinding
-//        // status countdown bar
-//    }
-//    else if (countdownPaused) { // if paused
-//      u8g2.setFont(u8g2_font_ncenR10_tr);
-//      u8g2.drawStr(48, 12, "Pause");
-//    } else {                    // if idle
-//      u8g2.setFont(u8g2_font_ncenR10_tr);
-//      u8g2.drawStr(0, 12, "#12");
-//      u8g2.drawStr(64, 12, "T:23m");
-//    }
-//    u8g2.drawHLine(0, 20, 128);
+    if (grinderState == HIGH) { // if grinding
+        // status countdown bar
+    }
+    else if (countdownPaused) { // if paused
+      u8g2.setFont(u8g2_font_ncenR10_tr);
+      u8g2.drawStr(40, 12, "Paused");
+    } else {                    // if idle
+      u8g2.setFont(u8g2_font_ncenR10_tr);
+      u8g2.drawStr(40, 12, (doubleShot ? "Double" : "Single"));
+    }
+    u8g2.drawHLine(0, 20, 128);
     u8g2.setFont(u8g2_font_osr35_tn);
     u8g2.drawStr(14, 63, m_str);
   } while ( u8g2.nextPage() );
@@ -149,7 +157,7 @@ void pauseCountdown() {
   secPaused = sLeft;
   dsecPaused = mLeft;
   drawTimer(secPaused, dsecPaused);
-  while (digitalRead(buttonPin) == false) {
+  while (digitalRead(encoderButton) == false) {
     delay(1);
   }
   Serial.print(secPaused);
@@ -192,7 +200,7 @@ void runCountdown() {
     //Serial.print(sLeft);
     //Serial.println(mLeft);
 
-    if (digitalRead(buttonPin) == false) { // pressed
+    if (digitalRead(encoderButton) == false) { // pressed
       pauseCountdown();
       Serial.println("Returning to main loop");
       return;
@@ -217,7 +225,9 @@ void runCountdown() {
 void setup(void) {
   pinMode(grinderPin, OUTPUT);
   pinMode(ledPin, OUTPUT);
-  pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(encoderButton, INPUT_PULLUP);
+  pinMode(singleButton, INPUT_PULLUP);
+  pinMode(doubleButton, INPUT_PULLUP);
   digitalWrite(grinderPin, grinderState); // sluk relæ / HIGH
   digitalWrite(ledPin, ledState); // sluk led // LOW
 
@@ -225,11 +235,6 @@ void setup(void) {
   u8g2.begin();
   delay(500);
   Serial.begin(115200);
-  
-  encoder.write(pos); // set the start value  
-  dsec = (pos/2) % 10; // tiendedele
-  sec = (pos/2) / 10;
-  drawTimer(sec, dsec);
 
   if (EEPROM.read(99) == 1) { // if eeprom is configured
     Serial.println("Loading saved state");
@@ -240,22 +245,32 @@ void setup(void) {
     totalRuntime = totalRuntime + (temp*255);
     temp = EEPROM.read(112);
     totalRuntime = totalRuntime + temp;
+    Serial.print("loaded total runtime: ");
+    Serial.println(totalRuntime);
 
     // Load last runtime
     pos = EEPROM.read(100)*2;
     lastPos = pos;
-  
+    encoder.write(pos);
+    Serial.print("loaded runtime: ");
+    Serial.println(pos);
+    
   } else {
     // First run
     Serial.println("First run, Configuring EEPROM");
     
     totalRuntime = 0;
     totalShotsGrinded = 0;
+    saveTotalRuntimeToEeprom(0);
     EEPROM.write(99, 1);
     saveRuntimeToEeprom(pos/2);
-    saveTotalRuntimeToEeprom(0);
+
+    encoder.write(pos); // set the start value  
   }
 
+  dsec = (pos/shotDivider) % 10; // tiendedele
+  sec = (pos/shotDivider) / 10;
+  drawTimer(sec, dsec);
   
 }
 
@@ -277,12 +292,11 @@ void loop(void) {
 
     // Convert pos to time and display
     if (!countdownPaused) {
-      dsec = (pos/2) % 10;
-      sec = (pos/2) / 10;
+      dsec = (pos/shotDivider) % 10;
+      sec = (pos/shotDivider) / 10;
       drawTimer(sec, dsec);
       lastPos = pos;
-      Serial.print(pos);
-      Serial.println();
+      Serial.println(pos);
     } else {
       encoder.write(lastPos);
     }
@@ -290,10 +304,12 @@ void loop(void) {
 
   // Button logic
   
-  thisButtonState = digitalRead(buttonPin); // read button state, LOW when pressed, HIGH when not
+  encButtonState = digitalRead(encoderButton); // read button state, LOW when pressed, HIGH when not
+  singleButtonState = digitalRead(singleButton); // read button state, LOW when pressed, HIGH when not
+  doubleButtonState = digitalRead(doubleButton); // read button state, LOW when pressed, HIGH when not
 
-  if (thisButtonState == LOW) { // if button pressed
-    if (lastButtonState == HIGH && (millis() - lastDebounceTime) > debounceDelay) { // check debounce
+  if (encButtonState == LOW) { // if button pressed
+    if (lastEncButtonState == HIGH && (millis() - lastDebounceTime) > debounceDelay) { // check debounce
       lastDebounceTime = millis(); // reset the debounce timer
       if (buttonHold) {
       buttonHold = false;
@@ -301,6 +317,40 @@ void loop(void) {
     }
   }
 
+  if (singleButtonState == LOW) { // if button pressed
+    if (lastSingleButtonState == HIGH && doubleButtonState == HIGH && (millis() - lastDebounceTime) > debounceDelay) { // check debounce
+      lastDebounceTime = millis(); // reset the debounce timer
+
+      if (doubleShot == true && !countdownPaused) {
+        doubleShot = false;
+        shotDivider = 2;
+        
+        // update display
+        dsec = (pos/shotDivider) % 10;
+        sec = (pos/shotDivider) / 10;
+        drawTimer(sec, dsec);
+      }
+      
+    }
+  }
+
+  if (doubleButtonState == LOW) { // if button pressed
+    if (lastDoubleButtonState == HIGH && singleButtonState == HIGH && (millis() - lastDebounceTime) > debounceDelay) { // check debounce
+      lastDebounceTime = millis(); // reset the debounce timer
+
+      if (doubleShot == false && !countdownPaused) {
+        doubleShot = true;
+        shotDivider = 1;
+        
+        // update display
+        dsec = (pos/shotDivider) % 10;
+        sec = (pos/shotDivider) / 10;
+        drawTimer(sec, dsec);
+      }
+      
+    }
+  }
+  
   // if the current state does not match the previous state
   // the button was just pressed/released, or is transition noise
 
@@ -308,28 +358,29 @@ void loop(void) {
   if ((millis() - lastDebounceTime) > debounceDelay && !buttonHold) {
 
     // on release
-    if (thisButtonState == HIGH && lastButtonState == LOW) {
+    if (encButtonState == HIGH && lastEncButtonState == LOW) {
       Serial.println("Countdown starting");
       saveRuntimeToEeprom(pos/2);
       runCountdown();
     }  
     
     // knappen holdt nede i minimum 1,5 sekunder
-    if (thisButtonState == LOW && (millis() - lastDebounceTime) > 1500) {
-      if (countdownPaused) {
+    if (encButtonState == LOW && (millis() - lastDebounceTime) > 1500) {
+      //if (countdownPaused) {
         countdownPaused = false;
         drawTimer(sec, dsec);
         Serial.println("Pause canceled");
-      } else {
+      //} else {
         //Serial.println("Enter menu");
         //drawMenu();
-      }
-      
+      //}
       
       buttonHold = true;
     }  
   }
   
   // persist for next loop iteration
-  lastButtonState = thisButtonState;
+  lastEncButtonState = encButtonState;
+  lastSingleButtonState = singleButtonState;
+  lastDoubleButtonState = doubleButtonState;
 }
